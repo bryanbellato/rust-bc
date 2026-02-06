@@ -15,7 +15,7 @@ use crate::currency::{Amount, AmountError};
 
 #[derive(Debug, Clone)]
 pub struct Transaction {
-    // Make public
+    id: String,
     from_address: String,
     to_address: String,
     amount: Amount,
@@ -77,12 +77,17 @@ impl Transaction {
             return Err(TransactionError::NonPositiveAmount);
         }
 
-        Ok(Transaction {
+        let mut tx = Transaction {
+            id: String::new(), // temporary
             from_address: from,
             to_address: to,
             amount,
             signature: None,
-        })
+        };
+
+        tx.id = tx.calculate_id();
+
+        Ok(tx)
     }
 
     pub fn new_reward(
@@ -97,12 +102,31 @@ impl Transaction {
 
         let amount = Amount::from_coins(amount_coins)?;
 
-        Ok(Transaction {
+        let mut tx = Transaction {
+            id: String::new(),
             from_address: String::new(),
             to_address: to,
             amount,
             signature: None,
-        })
+        };
+
+        tx.id = tx.calculate_id();
+
+        Ok(tx)
+    }
+
+    fn calculate_id(&self) -> String {
+        let data = format!(
+            "FromAddress:{},ToAddress:{},Amount:{}",
+            self.from_address,
+            self.to_address,
+            self.amount.satoshis()
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(data.as_bytes());
+        let hash = hasher.finalize();
+        hex::encode(hash)
     }
 
     fn get_data_string(&self) -> String {
@@ -114,12 +138,16 @@ impl Transaction {
         )
     }
 
+    /*
+     deprecated...
+
     pub fn calc_transaction_hash(&self) -> [u8; 32] {
         let data = self.get_data_string();
         let mut hasher = Sha256::new();
         hasher.update(data.as_bytes());
         hasher.finalize().into()
     }
+     */
 
     pub fn sign(&mut self, private_key_hex: &str) -> Result<(), TransactionError> {
         if self.signature.is_some() {
@@ -191,6 +219,10 @@ impl Transaction {
 
         // p256's verify_signature will hash the data with SHA-256 automatically
         Ok(verifying_key.verify(data.as_bytes(), &signature).is_ok())
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn from_address(&self) -> &str {

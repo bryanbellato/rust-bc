@@ -57,7 +57,7 @@ impl Blockchain {
         let genesis_transaction = Transaction::new_reward(miner_address, initial_reward.as_coins())
             .expect("Failed to create genesis transaction");
 
-        Block::new(vec![genesis_transaction], "0".to_string())
+        Block::origin(vec![genesis_transaction], "0".to_string())
     }
 
     pub fn get_latest_block(&self) -> Result<&Block, BlockchainError> {
@@ -75,7 +75,13 @@ impl Blockchain {
         self.pending_transactions.push(reward_tx);
 
         let previous_hash = self.get_latest_block()?.hash().to_string();
-        let mut new_block = Block::new(self.pending_transactions.clone(), previous_hash);
+
+        let mut new_block = Block::new(
+            self.pending_transactions.clone(),
+            previous_hash,
+            &self.chain,
+        )
+        .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
 
         new_block.mine_block(self.difficulty);
 
@@ -84,7 +90,6 @@ impl Blockchain {
 
         Ok(())
     }
-
     /*
      get the balance of an address across
      mined blocks
@@ -192,6 +197,13 @@ impl Blockchain {
                 );
                 return false;
             }
+
+            // validates timestamp
+            let previous_blocks = &self.chain[0..i];
+            if let Err(e) = current_block.validate_timestamp(previous_blocks) {
+                println!("Block {} has invalid timestamp: {}", i, e);
+                return false;
+            }
         }
 
         true
@@ -232,6 +244,7 @@ impl Blockchain {
 
             for (j, tx) in block.transactions().iter().enumerate() {
                 println!("    Transaction #{}:", j);
+                println!("    Hash ID: #{}:", tx.id());
                 println!("      From: {}", tx.from_address());
                 println!("      To: {}", tx.to_address());
                 println!("      Amount: {} coins", tx.amount());
