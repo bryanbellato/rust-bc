@@ -11,12 +11,14 @@ use p256::{
 use sha2::{Digest, Sha256};
 use std::fmt;
 
+use crate::currency::{Amount, AmountError};
+
 #[derive(Debug, Clone)]
 pub struct Transaction {
     // Make public
     from_address: String,
     to_address: String,
-    amount: f64,
+    amount: Amount,
     signature: Option<String>,
 }
 
@@ -24,9 +26,8 @@ pub struct Transaction {
 pub enum TransactionError {
     EmptyAddress,
     NonPositiveAmount,
-    AmountTooLarge,
+    AmountError(AmountError),
     ExistingSignature,
-    InsufficientFunds,
     CryptoError(String),
 }
 
@@ -35,9 +36,8 @@ impl fmt::Display for TransactionError {
         match self {
             TransactionError::EmptyAddress => write!(f, "from or to address is empty"),
             TransactionError::NonPositiveAmount => write!(f, "amount must be positive"),
-            TransactionError::AmountTooLarge => write!(f, "amount is too large"),
+            TransactionError::AmountError(e) => write!(f, "amount error: {}", e),
             TransactionError::ExistingSignature => write!(f, "transaction is already signed"),
-            TransactionError::InsufficientFunds => write!(f, "Not enough funds to send."),
             TransactionError::CryptoError(msg) => write!(f, "crypto error: {}", msg),
         }
     }
@@ -52,11 +52,17 @@ impl From<String> for TransactionError {
     }
 }
 
+impl From<AmountError> for TransactionError {
+    fn from(err: AmountError) -> Self {
+        TransactionError::AmountError(err)
+    }
+}
+
 impl Transaction {
     pub fn new(
         from_address: impl Into<String>,
         to_address: impl Into<String>,
-        amount: f64,
+        amount_coins: f64,
     ) -> Result<Self, TransactionError> {
         let from = from_address.into();
         let to = to_address.into();
@@ -64,11 +70,11 @@ impl Transaction {
         if from.is_empty() || to.is_empty() {
             return Err(TransactionError::EmptyAddress);
         }
-        if amount <= 0.0 {
+
+        let amount = Amount::from_coins(amount_coins)?;
+
+        if amount.is_zero() {
             return Err(TransactionError::NonPositiveAmount);
-        }
-        if amount > f64::MAX / 2.0 {
-            return Err(TransactionError::AmountTooLarge);
         }
 
         Ok(Transaction {
@@ -79,11 +85,9 @@ impl Transaction {
         })
     }
 
-    // used for mining rewards and Genesis Block
-    // this allows the 'from_address' to be empty.
     pub fn new_reward(
         to_address: impl Into<String>,
-        amount: f64,
+        amount_coins: f64,
     ) -> Result<Self, TransactionError> {
         let to = to_address.into();
 
@@ -91,12 +95,10 @@ impl Transaction {
             return Err(TransactionError::EmptyAddress);
         }
 
-        if amount < 0.0 {
-            return Err(TransactionError::NonPositiveAmount);
-        }
+        let amount = Amount::from_coins(amount_coins)?;
 
         Ok(Transaction {
-            from_address: String::new(), // Explicitly empty
+            from_address: String::new(),
             to_address: to,
             amount,
             signature: None,
@@ -106,7 +108,9 @@ impl Transaction {
     fn get_data_string(&self) -> String {
         format!(
             "FromAddress:{},ToAddress:{},Amount:{}",
-            self.from_address, self.to_address, self.amount
+            self.from_address,
+            self.to_address,
+            self.amount.satoshis()
         )
     }
 
@@ -192,12 +196,15 @@ impl Transaction {
     pub fn from_address(&self) -> &str {
         &self.from_address
     }
+
     pub fn to_address(&self) -> &str {
         &self.to_address
     }
-    pub fn amount(&self) -> f64 {
+
+    pub fn amount(&self) -> Amount {
         self.amount
     }
+
     pub fn signature(&self) -> Option<&str> {
         self.signature.as_deref()
     }

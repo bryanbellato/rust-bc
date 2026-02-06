@@ -2,12 +2,14 @@ use crate::block::Block;
 use crate::transaction::Transaction;
 use std::fmt;
 
+use crate::currency::Amount;
+
 #[derive(Debug, Clone)]
 pub struct Blockchain {
     chain: Vec<Block>,
     difficulty: usize,
     pending_transactions: Vec<Transaction>,
-    mining_reward: f64,
+    mining_reward: Amount,
 }
 
 #[derive(Debug)]
@@ -38,8 +40,10 @@ impl fmt::Display for BlockchainError {
 impl std::error::Error for BlockchainError {}
 
 impl Blockchain {
-    pub fn new(difficulty: usize, mining_reward: f64, miner_address: String) -> Self {
-        let genesis_block = Self::create_genesis_block(miner_address);
+    pub fn new(difficulty: usize, mining_reward_coins: f64, miner_address: String) -> Self {
+        let mining_reward = Amount::from_coins(mining_reward_coins).expect("Invalid mining reward");
+
+        let genesis_block = Self::create_genesis_block(miner_address, mining_reward);
 
         Blockchain {
             chain: vec![genesis_block],
@@ -49,8 +53,8 @@ impl Blockchain {
         }
     }
 
-    fn create_genesis_block(miner_address: String) -> Block {
-        let genesis_transaction = Transaction::new_reward(miner_address, 100.0)
+    fn create_genesis_block(miner_address: String, initial_reward: Amount) -> Block {
+        let genesis_transaction = Transaction::new_reward(miner_address, initial_reward.as_coins())
             .expect("Failed to create genesis transaction");
 
         Block::new(vec![genesis_transaction], "0".to_string())
@@ -64,8 +68,9 @@ impl Blockchain {
         &mut self,
         mining_reward_address: String,
     ) -> Result<(), BlockchainError> {
-        let reward_tx = Transaction::new_reward(mining_reward_address, self.mining_reward)
-            .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
+        let reward_tx =
+            Transaction::new_reward(mining_reward_address, self.mining_reward.as_coins())
+                .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
 
         self.pending_transactions.push(reward_tx);
 
@@ -75,7 +80,6 @@ impl Blockchain {
         new_block.mine_block(self.difficulty);
 
         self.chain.push(new_block);
-
         self.pending_transactions.clear();
 
         Ok(())
@@ -85,19 +89,20 @@ impl Blockchain {
      get the balance of an address across
      mined blocks
     */
-    pub fn get_balance(&self, address: &str) -> f64 {
-        let mut balance = 0.0;
+    pub fn get_balance(&self, address: &str) -> Amount {
+        let mut balance = Amount::from_satoshis(0);
 
         for block in &self.chain {
             for tx in block.transactions() {
-                // subtract if this address is the sender
                 if tx.from_address() == address {
-                    balance -= tx.amount();
+                    // subtract
+                    balance = balance
+                        .checked_sub(tx.amount())
+                        .unwrap_or(Amount::from_satoshis(0));
                 }
-
-                // add if this address is the recipient
                 if tx.to_address() == address {
-                    balance += tx.amount();
+                    // add
+                    balance = balance.checked_add(tx.amount()).unwrap_or(balance);
                 }
             }
         }
@@ -110,31 +115,33 @@ impl Blockchain {
      the previously confirmed balance
      minus pending transactions
     */
-    pub fn get_available_balance(&self, address: &str) -> f64 {
+    pub fn get_available_balance(&self, address: &str) -> Amount {
         let mut balance = self.get_balance(address);
 
-        // subtract pending outgoing transactions
         for tx in &self.pending_transactions {
             if tx.from_address() == address {
-                balance -= tx.amount();
+                balance = balance
+                    .checked_sub(tx.amount())
+                    .unwrap_or(Amount::from_satoshis(0));
             }
         }
 
         balance
     }
 
-    /// add a transaction to the pending transactions pool
+    // add a transaction to the pending transactions pool
     pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), BlockchainError> {
         if tx.from_address().is_empty() || tx.to_address().is_empty() {
             return Err(BlockchainError::EmptyAddress);
         }
 
         if !tx.from_address().is_empty() {
-            let sender_balance = self.get_available_balance(tx.from_address());
-            if tx.amount() > sender_balance {
+            let available = self.get_available_balance(tx.from_address());
+
+            if tx.amount() > available {
                 return Err(BlockchainError::InvalidTransaction(format!(
-                    "insufficient funds: has {:.2}, trying to send {:.2}",
-                    sender_balance,
+                    "insufficient funds: has {} coins, trying to send {} coins",
+                    available,
                     tx.amount()
                 )));
             }
@@ -148,18 +155,16 @@ impl Blockchain {
                     ));
                 }
             }
-            // Removed type annotation 'e: TransactionError'
             Err(e) => {
                 return Err(BlockchainError::InvalidSignature(e.to_string()));
             }
         }
 
         self.pending_transactions.push(tx);
-
         Ok(())
     }
 
-    /// validate the entire blockchain
+    // validate the entire blockchain
     pub fn is_chain_valid(&self) -> bool {
         // skip genesis block (index 0), start from index 1
         for i in 1..self.chain.len() {
@@ -205,14 +210,14 @@ impl Blockchain {
         &self.pending_transactions
     }
 
-    pub fn mining_reward(&self) -> f64 {
+    pub fn mining_reward(&self) -> Amount {
         self.mining_reward
     }
 
     pub fn print_chain(&self) {
-        println!("\n=== Blockchain ===");
+        println!("\n Blockchain:");
         println!("Difficulty: {}", self.difficulty);
-        println!("Mining Reward: {}", self.mining_reward);
+        println!("Mining Reward: {} coins", self.mining_reward);
         println!("Total Blocks: {}", self.chain.len());
         println!("Pending Transactions: {}", self.pending_transactions.len());
         println!("\n--- Blocks ---");
@@ -229,7 +234,7 @@ impl Blockchain {
                 println!("    Transaction #{}:", j);
                 println!("      From: {}", tx.from_address());
                 println!("      To: {}", tx.to_address());
-                println!("      Amount: {}", tx.amount());
+                println!("      Amount: {} coins", tx.amount());
                 println!("      Signature: {:?}", tx.signature());
             }
         }

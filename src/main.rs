@@ -1,5 +1,6 @@
 mod block;
 mod blockchain;
+mod currency;
 mod keypair;
 mod transaction;
 
@@ -8,9 +9,6 @@ use keypair::KeyPair;
 use transaction::Transaction;
 
 fn main() {
-    let difficulty: usize = 5;
-    let mining_reward: f64 = 100.0;
-
     let miner_keypair = match KeyPair::generate() {
         Ok(kp) => kp,
         Err(e) => {
@@ -36,7 +34,11 @@ fn main() {
     let recipient_address = recipient_keypair.get_public_key().to_string();
 
     // create blockchain with genesis block
-    let mut bc = Blockchain::new(difficulty, mining_reward, miner_address.clone());
+    /* parameters that you can modify:
+        difficulty: usize (default on the code is 5)
+        mining_reward: Amount (default on the code is 100.0)
+    */
+    let mut bc = Blockchain::new(5, 100.0, miner_address.clone());
 
     let miner_balance = bc.get_balance(&miner_address);
     println!(
