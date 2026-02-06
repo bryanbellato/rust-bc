@@ -81,6 +81,48 @@ impl Blockchain {
         Ok(())
     }
 
+    /*
+     get the balance of an address across
+     mined blocks
+    */
+    pub fn get_balance(&self, address: &str) -> f64 {
+        let mut balance = 0.0;
+
+        for block in &self.chain {
+            for tx in block.transactions() {
+                // subtract if this address is the sender
+                if tx.from_address() == address {
+                    balance -= tx.amount();
+                }
+
+                // add if this address is the recipient
+                if tx.to_address() == address {
+                    balance += tx.amount();
+                }
+            }
+        }
+
+        balance
+    }
+
+    /*
+     get the balance of an address across
+     the previously confirmed balance
+     minus pending transactions
+    */
+    pub fn get_available_balance(&self, address: &str) -> f64 {
+        let mut balance = self.get_balance(address);
+
+        // subtract pending outgoing transactions
+        for tx in &self.pending_transactions {
+            if tx.from_address() == address {
+                balance -= tx.amount();
+            }
+        }
+
+        balance
+    }
+
     /// add a transaction to the pending transactions pool
     pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), BlockchainError> {
         if tx.from_address().is_empty() || tx.to_address().is_empty() {
@@ -88,7 +130,7 @@ impl Blockchain {
         }
 
         if !tx.from_address().is_empty() {
-            let sender_balance = self.get_balance(tx.from_address());
+            let sender_balance = self.get_available_balance(tx.from_address());
             if tx.amount() > sender_balance {
                 return Err(BlockchainError::InvalidTransaction(format!(
                     "insufficient funds: has {:.2}, trying to send {:.2}",
@@ -115,27 +157,6 @@ impl Blockchain {
         self.pending_transactions.push(tx);
 
         Ok(())
-    }
-
-    /// get the balance of an address across the entire blockchain
-    pub fn get_balance(&self, address: &str) -> f64 {
-        let mut balance = 0.0;
-
-        for block in &self.chain {
-            for tx in block.transactions() {
-                // subtract if this address is the sender
-                if tx.from_address() == address {
-                    balance -= tx.amount();
-                }
-
-                // add if this address is the recipient
-                if tx.to_address() == address {
-                    balance += tx.amount();
-                }
-            }
-        }
-
-        balance
     }
 
     /// validate the entire blockchain
