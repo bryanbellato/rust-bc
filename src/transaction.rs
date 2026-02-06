@@ -26,6 +26,7 @@ pub enum TransactionError {
     NonPositiveAmount,
     AmountTooLarge,
     ExistingSignature,
+    InsufficientFunds,
     CryptoError(String),
 }
 
@@ -36,6 +37,7 @@ impl fmt::Display for TransactionError {
             TransactionError::NonPositiveAmount => write!(f, "amount must be positive"),
             TransactionError::AmountTooLarge => write!(f, "amount is too large"),
             TransactionError::ExistingSignature => write!(f, "transaction is already signed"),
+            TransactionError::InsufficientFunds => write!(f, "Not enough funds to send."),
             TransactionError::CryptoError(msg) => write!(f, "crypto error: {}", msg),
         }
     }
@@ -62,7 +64,6 @@ impl Transaction {
         if from.is_empty() || to.is_empty() {
             return Err(TransactionError::EmptyAddress);
         }
-
         if amount <= 0.0 {
             return Err(TransactionError::NonPositiveAmount);
         }

@@ -87,6 +87,17 @@ impl Blockchain {
             return Err(BlockchainError::EmptyAddress);
         }
 
+        if !tx.from_address().is_empty() {
+            let sender_balance = self.get_balance(tx.from_address());
+            if tx.amount() > sender_balance {
+                return Err(BlockchainError::InvalidTransaction(format!(
+                    "insufficient funds: has {:.2}, trying to send {:.2}",
+                    sender_balance,
+                    tx.amount()
+                )));
+            }
+        }
+
         match tx.verify_signature() {
             Ok(valid) => {
                 if !valid {
