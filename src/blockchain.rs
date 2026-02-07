@@ -10,6 +10,7 @@ pub struct Blockchain {
     difficulty: usize,
     pending_transactions: Vec<Transaction>,
     mining_reward: Amount,
+    min_fee_rate: u64,
 }
 
 #[derive(Debug)]
@@ -40,7 +41,12 @@ impl fmt::Display for BlockchainError {
 impl std::error::Error for BlockchainError {}
 
 impl Blockchain {
-    pub fn new(difficulty: usize, mining_reward_coins: f64, miner_address: String) -> Self {
+    pub fn new(
+        difficulty: usize,
+        mining_reward_coins: f64,
+        min_fee_rate_sats: u64,
+        miner_address: String,
+    ) -> Self {
         let mining_reward = Amount::from_coins(mining_reward_coins).expect("Invalid mining reward");
 
         let genesis_block = Self::create_genesis_block(miner_address, mining_reward);
@@ -50,6 +56,7 @@ impl Blockchain {
             difficulty,
             pending_transactions: Vec::new(),
             mining_reward,
+            min_fee_rate: min_fee_rate_sats,
         }
     }
 
@@ -64,12 +71,29 @@ impl Blockchain {
         self.chain.last().ok_or(BlockchainError::NoBlocks)
     }
 
+    fn calculate_total_fees(&self) -> Amount {
+        let mut total = Amount::from_satoshis(0);
+
+        for tx in &self.pending_transactions {
+            total = total.checked_add(tx.fee()).unwrap_or(total);
+        }
+
+        total
+    }
+
     pub fn mine_pending_transactions(
         &mut self,
         mining_reward_address: String,
     ) -> Result<(), BlockchainError> {
+        let total_fees = self.calculate_total_fees();
+
+        let total_miner_reward = self
+            .mining_reward
+            .checked_add(total_fees)
+            .unwrap_or(self.mining_reward);
+
         let reward_tx =
-            Transaction::new_reward(mining_reward_address, self.mining_reward.as_coins())
+            Transaction::new_reward(mining_reward_address, total_miner_reward.as_coins())
                 .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
 
         self.pending_transactions.push(reward_tx);
@@ -90,6 +114,7 @@ impl Blockchain {
 
         Ok(())
     }
+
     /*
      get the balance of an address across
      mined blocks
@@ -100,13 +125,14 @@ impl Blockchain {
         for block in &self.chain {
             for tx in block.transactions() {
                 if tx.from_address() == address {
-                    // subtract
+                    // cost of fee for the sender
+                    let total_cost = tx.total_cost();
                     balance = balance
-                        .checked_sub(tx.amount())
+                        .checked_sub(total_cost)
                         .unwrap_or(Amount::from_satoshis(0));
                 }
                 if tx.to_address() == address {
-                    // add
+                    // receiver receives the amount without fee
                     balance = balance.checked_add(tx.amount()).unwrap_or(balance);
                 }
             }
@@ -126,7 +152,7 @@ impl Blockchain {
         for tx in &self.pending_transactions {
             if tx.from_address() == address {
                 balance = balance
-                    .checked_sub(tx.amount())
+                    .checked_sub(tx.total_cost()) // amount + fee
                     .unwrap_or(Amount::from_satoshis(0));
             }
         }
@@ -141,13 +167,28 @@ impl Blockchain {
         }
 
         if !tx.from_address().is_empty() {
-            let available = self.get_available_balance(tx.from_address());
+            // validates minimum fee
+            let min_fee = Amount::from_satoshis(tx.estimate_size() as u64 * self.min_fee_rate);
 
-            if tx.amount() > available {
+            if tx.fee() < min_fee {
                 return Err(BlockchainError::InvalidTransaction(format!(
-                    "insufficient funds: has {} coins, trying to send {} coins",
+                    "fee too low: {} coins, minimum {} coins",
+                    tx.fee(),
+                    min_fee
+                )));
+            }
+
+            // validates balance (amount + fee)
+            let available = self.get_available_balance(tx.from_address());
+            let total_cost = tx.total_cost();
+
+            if total_cost > available {
+                return Err(BlockchainError::InvalidTransaction(format!(
+                    "insufficient funds: has {} coins, trying to send {} coins (amount: {}, fee: {})",
                     available,
-                    tx.amount()
+                    total_cost,
+                    tx.amount(),
+                    tx.fee()
                 )));
             }
         }
@@ -224,6 +265,10 @@ impl Blockchain {
 
     pub fn mining_reward(&self) -> Amount {
         self.mining_reward
+    }
+
+    pub fn min_fee_rate(&self) -> u64 {
+        self.min_fee_rate
     }
 
     pub fn print_chain(&self) {

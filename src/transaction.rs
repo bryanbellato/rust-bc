@@ -1,12 +1,10 @@
 use p256::{
-    EncodedPoint,
-    PublicKey,
-    SecretKey,
+    EncodedPoint, PublicKey, SecretKey,
     ecdsa::{
         Signature, SigningKey, VerifyingKey,
         signature::{Signer, Verifier},
     },
-    elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint}, // Added ToEncodedPoint
+    elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint},
 };
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -19,6 +17,7 @@ pub struct Transaction {
     from_address: String,
     to_address: String,
     amount: Amount,
+    fee: Amount,
     signature: Option<String>,
 }
 
@@ -63,6 +62,7 @@ impl Transaction {
         from_address: impl Into<String>,
         to_address: impl Into<String>,
         amount_coins: f64,
+        fee_coins: f64,
     ) -> Result<Self, TransactionError> {
         let from = from_address.into();
         let to = to_address.into();
@@ -72,6 +72,7 @@ impl Transaction {
         }
 
         let amount = Amount::from_coins(amount_coins)?;
+        let fee = Amount::from_coins(fee_coins)?;
 
         if amount.is_zero() {
             return Err(TransactionError::NonPositiveAmount);
@@ -82,6 +83,7 @@ impl Transaction {
             from_address: from,
             to_address: to,
             amount,
+            fee,
             signature: None,
         };
 
@@ -107,6 +109,7 @@ impl Transaction {
             from_address: String::new(),
             to_address: to,
             amount,
+            fee: Amount::from_satoshis(0),
             signature: None,
         };
 
@@ -117,10 +120,11 @@ impl Transaction {
 
     fn calculate_id(&self) -> String {
         let data = format!(
-            "FromAddress:{},ToAddress:{},Amount:{}",
+            "FromAddress:{},ToAddress:{},Amount:{},Fee:{}",
             self.from_address,
             self.to_address,
-            self.amount.satoshis()
+            self.amount.satoshis(),
+            self.fee.satoshis()
         );
 
         let mut hasher = Sha256::new();
@@ -131,10 +135,11 @@ impl Transaction {
 
     fn get_data_string(&self) -> String {
         format!(
-            "FromAddress:{},ToAddress:{},Amount:{}",
+            "FromAddress:{},ToAddress:{},Amount:{},Fee:{}",
             self.from_address,
             self.to_address,
-            self.amount.satoshis()
+            self.amount.satoshis(),
+            self.fee.satoshis()
         )
     }
 
@@ -162,7 +167,6 @@ impl Transaction {
 
         let public_key = secret_key.public_key();
 
-        // Used ToEncodedPoint here
         let encoded_point = public_key.to_encoded_point(false);
         let public_key_hex = hex::encode(encoded_point.as_bytes());
 
@@ -221,6 +225,31 @@ impl Transaction {
         Ok(verifying_key.verify(data.as_bytes(), &signature).is_ok())
     }
 
+    pub fn estimate_size(&self) -> usize {
+        let base_size = 32 +  // txid (hash)
+        65 +  // from_address (uncompressed pubkey)
+        65 +  // to_address
+        8 +   // amount (u64)
+        8; // fee (u64)
+
+        let witness_size = self
+            .signature
+            .as_ref()
+            .map(|sig| sig.len() / 2) // hex to bytes
+            .unwrap_or(72); // signature DER ~70-72 bytes
+
+        base_size + witness_size
+    }
+
+    pub fn suggest_fee(&self, satoshis_per_byte: u64) -> Amount {
+        let size = self.estimate_size() as u64;
+        Amount::from_satoshis(size * satoshis_per_byte)
+    }
+
+    pub fn total_cost(&self) -> Amount {
+        self.amount.checked_add(self.fee).unwrap_or(self.amount) // if occurs a overflow, it returns only the amount
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -235,6 +264,10 @@ impl Transaction {
 
     pub fn amount(&self) -> Amount {
         self.amount
+    }
+
+    pub fn fee(&self) -> Amount {
+        self.fee
     }
 
     pub fn signature(&self) -> Option<&str> {
