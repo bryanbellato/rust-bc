@@ -1,3 +1,4 @@
+use crate::merkle::{self, MerkleProof, MerkleRoot};
 use crate::transaction::Transaction;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
@@ -7,9 +8,30 @@ use std::fmt;
 pub struct Block {
     timestamp: String,
     transactions: Vec<Transaction>,
+    merkle_root: MerkleRoot,
     previous_hash: String,
     hash: String,
     nonce: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SPVProof {
+    pub tx: Transaction,
+    pub tx_index: usize,
+    pub merkle_proof: MerkleProof,
+    pub block_hash: String,
+    pub merkle_root: MerkleRoot,
+}
+
+impl SPVProof {
+    pub fn verify(&self) -> bool {
+        Block::verify_proof_with_root(
+            &self.tx,
+            self.tx_index,
+            &self.merkle_proof,
+            &self.merkle_root,
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -36,7 +58,7 @@ impl Block {
     pub fn new(
         transactions: Vec<Transaction>,
         previous_hash: String,
-        previous_blocks: &[Block], // receive previous blocks for MTP validation
+        previous_blocks: &[Block],
     ) -> Result<Self, BlockError> {
         let timestamp = chrono::Utc::now();
 
@@ -65,9 +87,12 @@ impl Block {
             )));
         }
 
+        let merkle_root = Self::calculate_merkle_root_from_txs(&transactions)?;
+
         let mut block = Block {
             timestamp: timestamp.to_rfc3339(),
             transactions,
+            merkle_root,
             previous_hash,
             hash: String::new(),
             nonce: 0,
@@ -81,9 +106,12 @@ impl Block {
     pub fn origin(transactions: Vec<Transaction>, previous_hash: String) -> Self {
         let timestamp = chrono::Utc::now().to_rfc3339();
 
+        let merkle_root = Self::calculate_merkle_root_from_txs(&transactions).unwrap_or([0u8; 32]);
+
         let mut block = Block {
             timestamp,
             transactions,
+            merkle_root,
             previous_hash,
             hash: String::new(),
             nonce: 0,
@@ -91,6 +119,36 @@ impl Block {
 
         block.hash = block.calculate_hash();
         block
+    }
+
+    fn calculate_merkle_root_from_txs(
+        transactions: &[Transaction],
+    ) -> Result<MerkleRoot, BlockError> {
+        if transactions.is_empty() {
+            return Ok([0u8; 32]);
+        }
+
+        let tx_hashes: Vec<[u8; 32]> = transactions
+            .iter()
+            .map(|tx| Self::hash_transaction(tx))
+            .collect();
+
+        Ok(merkle::calculate_merkle_root(&tx_hashes))
+    }
+
+    fn hash_transaction(tx: &Transaction) -> [u8; 32] {
+        let tx_data = format!(
+            "{}|{}|{}|{}|{}",
+            tx.from_address(),
+            tx.to_address(),
+            tx.amount().satoshis(),
+            tx.fee().satoshis(),
+            tx.signature().unwrap_or("")
+        );
+
+        let first_hash = Sha256::digest(tx_data.as_bytes());
+        let second_hash = Sha256::digest(first_hash);
+        second_hash.into()
     }
 
     // calculates the median time of the latest 11 blocks
@@ -154,30 +212,73 @@ impl Block {
     }
 
     pub fn calculate_hash(&self) -> String {
-        let mut tx_strings = Vec::new();
-
-        for tx in &self.transactions {
-            let tx_str = format!(
-                "{}|{}|{}|{}",
-                tx.from_address(),
-                tx.to_address(),
-                tx.amount().satoshis(),
-                tx.signature().unwrap_or("")
-            );
-            tx_strings.push(tx_str);
-        }
-
-        let transactions_str = tx_strings.join(",");
         let data = format!(
             "{}{}{}{}",
-            self.timestamp, transactions_str, self.previous_hash, self.nonce
+            self.timestamp,
+            hex::encode(self.merkle_root),
+            self.previous_hash,
+            self.nonce
         );
 
         let mut hasher = Sha256::new();
         hasher.update(data.as_bytes());
-        let hash = hasher.finalize();
+        hex::encode(hasher.finalize())
+    }
 
-        hex::encode(hash)
+    pub fn get_transaction_proof(&self, tx_index: usize) -> Result<MerkleProof, BlockError> {
+        if tx_index >= self.transactions.len() {
+            return Err(BlockError::InvalidTransaction(
+                "Transaction index out of bounds".to_string(),
+            ));
+        }
+
+        let tx_hashes: Vec<[u8; 32]> = self
+            .transactions
+            .iter()
+            .map(|tx| Self::hash_transaction(tx))
+            .collect();
+
+        let (_root, tree) = merkle::build_merkle_tree(&tx_hashes);
+
+        merkle::generate_proof(&tree, tx_index).map_err(|e| BlockError::InvalidTransaction(e))
+    }
+
+    pub fn verify_transaction_proof(
+        &self,
+        tx: &Transaction,
+        tx_index: usize,
+        proof: &MerkleProof,
+    ) -> bool {
+        let tx_hash = Self::hash_transaction(tx);
+        merkle::verify_proof(&tx_hash, tx_index, proof, &self.merkle_root)
+    }
+
+    pub fn verify_proof_with_root(
+        tx: &Transaction,
+        tx_index: usize,
+        proof: &MerkleProof,
+        merkle_root: &MerkleRoot,
+    ) -> bool {
+        let tx_hash = Self::hash_transaction(tx);
+        merkle::verify_proof(&tx_hash, tx_index, proof, merkle_root)
+    }
+
+    pub fn create_spv_proof(&self, tx_index: usize) -> Result<SPVProof, BlockError> {
+        if tx_index >= self.transactions.len() {
+            return Err(BlockError::InvalidTransaction(
+                "Transaction index out of bounds".to_string(),
+            ));
+        }
+
+        let proof = self.get_transaction_proof(tx_index)?;
+
+        Ok(SPVProof {
+            tx: self.transactions[tx_index].clone(),
+            tx_index,
+            merkle_proof: proof,
+            block_hash: self.hash.clone(),
+            merkle_root: self.merkle_root,
+        })
     }
 
     pub fn mine_block(&mut self, difficulty: usize) {
@@ -203,7 +304,20 @@ impl Block {
     }
 
     pub fn validate_block(&self) -> bool {
-        self.hash == self.calculate_hash()
+        if self.hash != self.calculate_hash() {
+            return false;
+        }
+
+        if let Ok(computed_root) = Self::calculate_merkle_root_from_txs(&self.transactions) {
+            if computed_root != self.merkle_root {
+                println!("Merkle root mismatch!");
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        true
     }
 
     // check if all transactions in the block have valid signatures
@@ -225,6 +339,20 @@ impl Block {
         true
     }
 
+    pub fn print_merkle_tree(&self) {
+        println!("Generatin Merkle Tree for Block Hash: {}", self.hash);
+
+        let tx_hashes: Vec<[u8; 32]> = self
+            .transactions
+            .iter()
+            .map(|tx| Self::hash_transaction(tx))
+            .collect();
+
+        let (_root, tree_structure) = merkle::build_merkle_tree(&tx_hashes);
+
+        merkle::print_merkle_tree(&tree_structure);
+    }
+
     // getters
     pub fn timestamp(&self) -> &str {
         &self.timestamp
@@ -244,5 +372,9 @@ impl Block {
 
     pub fn nonce(&self) -> u64 {
         self.nonce
+    }
+
+    pub fn merkle_root(&self) -> &MerkleRoot {
+        &self.merkle_root
     }
 }
