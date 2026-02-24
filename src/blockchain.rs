@@ -1,10 +1,24 @@
 use crate::block::Block;
-use crate::transaction::Transaction;
-use std::fmt;
-
 use crate::currency::Amount;
+use crate::transaction::Transaction;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Clone)]
+// this is the type the network layer will pass around between threads.
+/*
+   RwLock is chosen over Mutex because get_balance, is_chain_valid and chain()
+   can run oncurrently across many threads with no coordination overhead
+   only mine_pending_transactions and add_transaction need exclusive access
+*/
+pub type SharedBlockchain = Arc<RwLock<Blockchain>>;
+
+// convenience constructor so callers don't need to spell out Arc::new(RwLock::new(...))
+pub fn new_shared(blockchain: Blockchain) -> SharedBlockchain {
+    Arc::new(RwLock::new(blockchain))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Blockchain {
     chain: Vec<Block>,
     difficulty: usize,
@@ -72,13 +86,11 @@ impl Blockchain {
     }
 
     fn calculate_total_fees(&self) -> Amount {
-        let mut total = Amount::from_satoshis(0);
-
-        for tx in &self.pending_transactions {
-            total = total.checked_add(tx.fee()).unwrap_or(total);
-        }
-
-        total
+        self.pending_transactions
+            .iter()
+            .fold(Amount::from_satoshis(0), |acc, tx| {
+                acc.checked_add(tx.fee()).unwrap_or(acc)
+            })
     }
 
     pub fn mine_pending_transactions(
@@ -210,44 +222,57 @@ impl Blockchain {
         Ok(())
     }
 
-    // validate the entire blockchain
-    pub fn is_chain_valid(&self) -> bool {
-        // skip genesis block (index 0), start from index 1
-        for i in 1..self.chain.len() {
-            let current_block = &self.chain[i];
-            let previous_block = &self.chain[i - 1];
+    /*
+     replace_chain — used during P2P sync (longest valid chain wins)
 
-            // check if all transactions in the block are valid
-            if !current_block.has_valid_transactions() {
-                println!("Block {} has invalid transactions", i);
+     replaces the local chain only if the incoming chain is longer or
+     100% internally valid (all hashes, merkle roots, timestamps check out)
+
+     returns true if the chain was replaced or false if ours was kept.
+    */
+    pub fn replace_chain(&mut self, incoming: Vec<Block>) -> bool {
+        if incoming.len() <= self.chain.len() {
+            return false;
+        }
+
+        if !Self::validate_chain(&incoming) {
+            println!("[SYNC] Rejected incoming chain: failed validation");
+            return false;
+        }
+
+        println!(
+            "[SYNC] Replacing chain: {} blocks -> {} blocks",
+            self.chain.len(),
+            incoming.len()
+        );
+        self.chain = incoming;
+        self.pending_transactions.clear();
+        true
+    }
+
+    fn validate_chain(chain: &[Block]) -> bool {
+        for i in 1..chain.len() {
+            let current = &chain[i];
+            let previous = &chain[i - 1];
+
+            if !current.has_valid_transactions() {
                 return false;
             }
-
-            // check if the block's hash is valid
-            if !current_block.validate_block() {
-                println!("Block {} hash is invalid", i);
+            if !current.validate_block() {
                 return false;
             }
-
-            // check if the previous hash matches
-            if current_block.previous_hash() != previous_block.hash() {
-                println!(
-                    "Block {} previous hash doesn't match block {} hash",
-                    i,
-                    i - 1
-                );
+            if current.previous_hash() != previous.hash() {
                 return false;
             }
-
-            // validates timestamp
-            let previous_blocks = &self.chain[0..i];
-            if let Err(e) = current_block.validate_timestamp(previous_blocks) {
-                println!("Block {} has invalid timestamp: {}", i, e);
+            if current.validate_timestamp(&chain[0..i]).is_err() {
                 return false;
             }
         }
-
         true
+    }
+
+    pub fn is_chain_valid(&self) -> bool {
+        Self::validate_chain(&self.chain)
     }
 
     // getters
@@ -297,5 +322,94 @@ impl Blockchain {
             }
         }
         println!("\n==================\n");
+    }
+}
+
+#[cfg(test)]
+mod serde_tests {
+    use super::*;
+    use crate::keypair::KeyPair;
+
+    fn make_test_blockchain() -> Blockchain {
+        let kp = KeyPair::generate().unwrap();
+        let addr = kp.get_public_key().to_string();
+
+        let mut bc = Blockchain::new(1, 10.0, 1, addr.clone());
+
+        let mut tx = Transaction::new(&addr, &addr, 1.0, 0.001).unwrap();
+        tx.sign(kp.get_private_key()).unwrap();
+        bc.add_transaction(tx).unwrap();
+        bc.mine_pending_transactions(addr).unwrap();
+
+        bc
+    }
+
+    #[test]
+    fn amount_roundtrip() {
+        let a = Amount::from_satoshis(150_000_000);
+        let json = serde_json::to_string(&a).unwrap();
+        assert_eq!(json, "150000000");
+        let back: Amount = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, back);
+    }
+
+    #[test]
+    fn transaction_roundtrip() {
+        let kp = KeyPair::generate().unwrap();
+        let addr = kp.get_public_key().to_string();
+        let mut tx = Transaction::new(&addr, &addr, 1.0, 0.001).unwrap();
+        tx.sign(kp.get_private_key()).unwrap();
+
+        let json = serde_json::to_string(&tx).unwrap();
+        let back: Transaction = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(tx.id(), back.id());
+        assert_eq!(tx.amount(), back.amount());
+        assert_eq!(tx.signature(), back.signature());
+        assert!(back.verify_signature().unwrap());
+    }
+
+    #[test]
+    fn block_roundtrip() {
+        let bc = make_test_blockchain();
+        let block = &bc.chain()[1];
+
+        let json = serde_json::to_string(block).unwrap();
+        let back: Block = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(block.hash(), back.hash());
+        assert_eq!(block.merkle_root(), back.merkle_root());
+        assert_eq!(block.transactions().len(), back.transactions().len());
+        assert!(back.validate_block());
+    }
+
+    #[test]
+    fn blockchain_roundtrip() {
+        let bc = make_test_blockchain();
+
+        let json = serde_json::to_string(&bc).unwrap();
+        let back: Blockchain = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(bc.chain().len(), back.chain().len());
+        assert!(back.is_chain_valid());
+    }
+
+    #[test]
+    fn merkle_root_serializes_as_hex_string() {
+        let bc = make_test_blockchain();
+        let block = &bc.chain()[1];
+        let json = serde_json::to_string(block).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(
+            parsed["merkle_root"].is_string(),
+            "merkle_root should serialize as a hex string"
+        );
+        let hex_str = parsed["merkle_root"].as_str().unwrap();
+        assert_eq!(
+            hex_str.len(),
+            64,
+            "hex string should be 64 chars (32 bytes)"
+        );
     }
 }

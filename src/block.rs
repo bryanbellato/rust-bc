@@ -1,25 +1,76 @@
 use crate::merkle::{self, MerkleProof, MerkleRoot};
 use crate::transaction::Transaction;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-#[derive(Debug, Clone)]
+mod hex_array {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
+        let hex_str = String::deserialize(d)?;
+        let bytes = hex::decode(&hex_str).map_err(D::Error::custom)?;
+        bytes
+            .try_into()
+            .map_err(|_| D::Error::custom("merkle root must be exactly 32 bytes"))
+    }
+}
+
+mod hex_array_vec {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error, ser::SerializeSeq};
+
+    pub fn serialize<S: Serializer>(vec: &Vec<[u8; 32]>, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(vec.len()))?;
+        for item in vec {
+            seq.serialize_element(&hex::encode(item))?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<[u8; 32]>, D::Error> {
+        let hex_strings: Vec<String> = Vec::deserialize(d)?;
+        hex_strings
+            .iter()
+            .map(|s| {
+                let bytes = hex::decode(s).map_err(D::Error::custom)?;
+                bytes
+                    .try_into()
+                    .map_err(|_| D::Error::custom("proof hash must be exactly 32 bytes"))
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
     timestamp: String,
     transactions: Vec<Transaction>,
+
+    // a compact hex string
+    #[serde(with = "hex_array")]
     merkle_root: MerkleRoot,
+
     previous_hash: String,
     hash: String,
     nonce: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SPVProof {
     pub tx: Transaction,
     pub tx_index: usize,
+
+    #[serde(with = "hex_array_vec")]
     pub merkle_proof: MerkleProof,
+
     pub block_hash: String,
+
+    #[serde(with = "hex_array")]
     pub merkle_root: MerkleRoot,
 }
 

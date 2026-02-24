@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub const SATOSHIS_PER_COIN: u64 = 100_000_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Amount(u64);
 
 #[derive(Debug)]
@@ -37,15 +39,12 @@ impl Amount {
         if coins < 0.0 {
             return Err(AmountError::NonPositive);
         }
-
         let satoshis = (coins * SATOSHIS_PER_COIN as f64).round() as u64;
-
         if satoshis == 0 && coins > 0.0 {
             return Err(AmountError::ParseError(
                 "amount too small (minimum 1 satoshi)".to_string(),
             ));
         }
-
         Ok(Amount(satoshis))
     }
 

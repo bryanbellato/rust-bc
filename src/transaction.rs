@@ -6,12 +6,13 @@ use p256::{
     },
     elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint},
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
 use crate::currency::{Amount, AmountError};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
     id: String,
     from_address: String,
