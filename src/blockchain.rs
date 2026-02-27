@@ -296,6 +296,39 @@ impl Blockchain {
         self.min_fee_rate
     }
 
+    pub fn is_unsynced_genesis(&self) -> bool {
+        self.chain.len() == 1
+    }
+
+    pub fn replace_chain_bootstrap(&mut self, incoming: Vec<Block>) -> bool {
+        // only allow unconditional replacement while we're on our own genesis
+        let is_new_node = self.is_unsynced_genesis();
+
+        if !is_new_node && incoming.len() <= self.chain.len() {
+            return false; // normal rule, must be strictly longer
+        }
+
+        if !Self::validate_chain(&incoming) {
+            println!("[SYNC] Rejected incoming chain: failed validation");
+            return false;
+        }
+
+        println!(
+            "[SYNC] {} chain: {} block(s) → {} block(s)",
+            if is_new_node {
+                "Bootstrap-replacing"
+            } else {
+                "Replacing"
+            },
+            self.chain.len(),
+            incoming.len()
+        );
+
+        self.chain = incoming;
+        self.pending_transactions.clear();
+        true
+    }
+
     pub fn print_chain(&self) {
         println!("\n Blockchain:");
         println!("Difficulty: {}", self.difficulty);
