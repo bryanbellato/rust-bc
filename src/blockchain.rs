@@ -93,6 +93,32 @@ impl Blockchain {
             })
     }
 
+    pub fn prepare_mining(
+        &mut self,
+        miner_address: String,
+    ) -> Result<(Block, usize), BlockchainError> {
+        let total_fees = self.calculate_total_fees();
+
+        let total_reward = self
+        .mining_reward
+        .checked_add(total_fees)
+        .unwrap_or(self.mining_reward);
+
+        let reward_tx =
+        Transaction::new_reward(miner_address, total_reward.as_coins())
+        .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
+
+        let mut txs = self.pending_transactions.clone();
+        txs.push(reward_tx);
+
+        let previous_hash = self.get_latest_block()?.hash().to_string();
+
+        let block = Block::new(txs, previous_hash, &self.chain)
+        .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
+
+        Ok((block, self.difficulty))
+    }
+
     pub fn mine_pending_transactions(
         &mut self,
         mining_reward_address: String,
@@ -124,6 +150,27 @@ impl Blockchain {
         self.chain.push(new_block);
         self.pending_transactions.clear();
 
+        Ok(())
+    }
+
+    pub fn commit_mined_block(&mut self, block: Block) -> Result<(), BlockchainError> {
+        if !block.validate_block() {
+            return Err(BlockchainError::InvalidTransaction(
+                "mined block failed validation before commit".to_string(),
+            ));
+        }
+
+        let tip_hash = self.get_latest_block()?.hash().to_string();
+        if block.previous_hash() != tip_hash {
+            return Err(BlockchainError::InvalidTransaction(format!(
+                "mined block is stale: links to {} but our tip is {}",
+                &block.previous_hash()[..12],
+                &tip_hash[..12],
+            )));
+        }
+
+        self.chain.push(block);
+        self.pending_transactions.clear();
         Ok(())
     }
 
